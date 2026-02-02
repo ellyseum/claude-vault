@@ -1,0 +1,11 @@
+{
+  "name": "claude-vault",
+  "version": "1.0.0",
+  "description": "Secure secrets handling for Claude Code - run API calls without exposing keys in session logs",
+  "author": {
+    "name": "Ellyseum",
+    "email": "jocelyn@ellyseum.dev"
+  },
+  "repository": "https://github.com/ellyseum/claude-vault",
+  "keywords": ["secrets", "security", "api-keys", "vault"]
+}

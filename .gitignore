@@ -1,0 +1,14 @@
+# Never commit actual secrets
+.secrets/
+*.env
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+*.swp
+*.swo
+*~
+.idea/
+.vscode/

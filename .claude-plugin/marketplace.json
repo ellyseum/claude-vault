@@ -1,0 +1,21 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "ellyseum-claude-vault",
+  "description": "Secure secrets handling for Claude Code - run API calls without exposing keys in session logs",
+  "owner": {
+    "name": "Ellyseum",
+    "email": "jocelyn@ellyseum.dev"
+  },
+  "plugins": [
+    {
+      "name": "claude-vault",
+      "description": "Secure secrets handling for Claude Code - run API calls without exposing keys in session logs",
+      "version": "1.0.0",
+      "author": {
+        "name": "Ellyseum",
+        "email": "jocelyn@ellyseum.dev"
+      },
+      "source": "./"
+    }
+  ]
+}

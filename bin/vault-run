@@ -1,0 +1,349 @@
+#!/usr/bin/env bash
+#
+# vault-run - Utility commands for claude-vault
+#
+# The actual secret handling is done by Claude writing self-destructing scripts.
+# This script just provides helper utilities.
+#
+
+set -e
+
+SECRETS_DIR="$HOME/.secrets"
+CLAUDE_PROJECTS="$HOME/.claude/projects"
+
+# Colors
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[0;33m'
+NC='\033[0m'
+
+# List configured services
+do_list() {
+    if [[ ! -d "$SECRETS_DIR" ]]; then
+        echo "No secrets directory found at $SECRETS_DIR"
+        echo ""
+        echo "Create it with:"
+        echo "  mkdir -p ~/.secrets && chmod 700 ~/.secrets"
+        return 0
+    fi
+
+    echo "Secrets in $SECRETS_DIR:"
+    echo ""
+
+    shopt -s nullglob
+    local found=0
+    for f in "$SECRETS_DIR"/*; do
+        [[ -f "$f" ]] || continue
+        local name=$(basename "$f")
+        local perms=$(stat -c "%a" "$f" 2>/dev/null || stat -f "%OLp" "$f" 2>/dev/null)
+
+        if [[ "$perms" == "600" ]]; then
+            echo -e "  ${GREEN}✓${NC} $name"
+        else
+            echo -e "  ${YELLOW}⚠${NC} $name (perms: $perms, should be 600)"
+        fi
+        ((found++))
+    done
+
+    if [[ $found -eq 0 ]]; then
+        echo "  (none)"
+    fi
+}
+
+# Test if a service has secrets
+do_test() {
+    local service="$1"
+
+    if [[ -z "$service" ]]; then
+        echo "Usage: vault-run test <service>"
+        return 1
+    fi
+
+    shopt -s nullglob
+    local found=()
+    for f in "$SECRETS_DIR/$service".*; do
+        [[ -f "$f" ]] && found+=("$f")
+    done
+
+    if [[ ${#found[@]} -eq 0 ]]; then
+        echo -e "${RED}✗ No secrets found for '$service'${NC}"
+        echo "  Expected: ~/.secrets/$service.env, ~/.secrets/$service.json, etc."
+        return 1
+    fi
+
+    for f in "${found[@]}"; do
+        echo -e "${GREEN}✓ Found:${NC} $f"
+    done
+}
+
+# API key patterns for scanning
+API_KEY_PATTERNS=(
+    'sk-[a-zA-Z0-9]{20,}'
+    'sk-proj-[a-zA-Z0-9_-]{20,}'
+    'sk-ant-[a-zA-Z0-9_-]{20,}'
+    'ghp_[a-zA-Z0-9]{36}'
+    'gho_[a-zA-Z0-9]{36}'
+    'ghu_[a-zA-Z0-9]{36}'
+    'ghs_[a-zA-Z0-9]{36}'
+    'ghr_[a-zA-Z0-9]{36}'
+    'AKIA[A-Z0-9]{16}'
+    'sk_live_[a-zA-Z0-9]{24,}'
+    'sk_test_[a-zA-Z0-9]{24,}'
+    'pk_live_[a-zA-Z0-9]{24,}'
+    'pk_test_[a-zA-Z0-9]{24,}'
+    'xoxb-[a-zA-Z0-9-]{20,}'
+    'xoxp-[a-zA-Z0-9-]{20,}'
+    'xoxa-[a-zA-Z0-9-]{20,}'
+    '[MN][a-zA-Z0-9]{23,}\.[a-zA-Z0-9_-]{6}\.[a-zA-Z0-9_-]{27}'
+    'Authorization:\s*Bearer\s+[a-zA-Z0-9_-]{20,}'
+    'api[_-]?key["\x27]?\s*[:=]\s*["\x27]?[a-zA-Z0-9_-]{20,}'
+    'secret[_-]?key["\x27]?\s*[:=]\s*["\x27]?[a-zA-Z0-9_-]{20,}'
+    'access[_-]?token["\x27]?\s*[:=]\s*["\x27]?[a-zA-Z0-9_-]{20,}'
+    '["\x27]?token["\x27]?\s*[:=]\s*["\x27]?[a-zA-Z0-9_-]{32,}'
+    '["\x27]?secret["\x27]?\s*[:=]\s*["\x27]?[a-zA-Z0-9_-]{32,}'
+    'password["\x27]?\s*[:=]\s*["\x27]?[^\s"\x27]{8,}'
+)
+
+build_pattern() {
+    local pattern=""
+    for p in "${API_KEY_PATTERNS[@]}"; do
+        [[ -n "$pattern" ]] && pattern="$pattern|"
+        pattern="$pattern$p"
+    done
+    echo "$pattern"
+}
+
+# Scan session logs for leaked secrets
+do_scan() {
+    local verbose="${1:-}"
+
+    if [[ ! -d "$CLAUDE_PROJECTS" ]]; then
+        echo "No Claude projects directory found"
+        return 0
+    fi
+
+    local pattern=$(build_pattern)
+    local total_matches=0
+    local files_with_leaks=0
+
+    echo "Scanning Claude session logs for exposed secrets..."
+    echo ""
+
+    while IFS= read -r -d '' session_file; do
+        local matches=$(grep -oEi "$pattern" "$session_file" 2>/dev/null | wc -l || true)
+
+        if [[ $matches -gt 0 ]]; then
+            ((files_with_leaks++))
+            ((total_matches += matches))
+
+            local project_name=$(echo "$session_file" | sed "s|$CLAUDE_PROJECTS/||" | cut -d'/' -f1)
+            echo -e "${RED}✗ $project_name${NC}: $matches potential leak(s)"
+
+            if [[ "$verbose" == "-v" || "$verbose" == "--verbose" ]]; then
+                echo "  File: $session_file"
+                grep -oEi "$pattern" "$session_file" 2>/dev/null | sort -u | while read -r match; do
+                    local redacted="${match:0:10}...${match: -4}"
+                    echo -e "    ${YELLOW}$redacted${NC}"
+                done
+                echo ""
+            fi
+        fi
+    done < <(find "$CLAUDE_PROJECTS" -name "*.jsonl" -print0 2>/dev/null) || true
+
+    echo ""
+    if [[ $total_matches -eq 0 ]]; then
+        echo -e "${GREEN}✓ No exposed secrets found${NC}"
+    else
+        echo -e "${RED}Found $total_matches potential leak(s) in $files_with_leaks file(s)${NC}"
+        echo ""
+        echo "Run '/secrets redact' to fix these leaks"
+    fi
+}
+
+# Redact secrets from session logs
+do_redact() {
+    local dry_run="${1:-}"
+
+    if [[ ! -d "$CLAUDE_PROJECTS" ]]; then
+        echo "No Claude projects directory found"
+        return 0
+    fi
+
+    local pattern=$(build_pattern)
+    local total_redacted=0
+    local files_modified=0
+
+    [[ "$dry_run" == "--dry-run" || "$dry_run" == "-n" ]] && echo "DRY RUN - no files will be modified" && echo ""
+
+    echo "Scanning and redacting secrets from Claude session logs..."
+    echo ""
+
+    while IFS= read -r -d '' session_file; do
+        local matches=$(grep -oEi "$pattern" "$session_file" 2>/dev/null | wc -l || true)
+
+        if [[ $matches -gt 0 ]]; then
+            local project_name=$(echo "$session_file" | sed "s|$CLAUDE_PROJECTS/||" | cut -d'/' -f1)
+
+            if [[ "$dry_run" == "--dry-run" || "$dry_run" == "-n" ]]; then
+                echo -e "${YELLOW}Would redact${NC} $project_name: $matches secret(s)"
+            else
+                local temp_file=$(mktemp)
+                cp "$session_file" "$temp_file"
+
+                for p in "${API_KEY_PATTERNS[@]}"; do
+                    perl -pi -e "s/($p)/[REDACTED]/gi" "$temp_file" 2>/dev/null || \
+                    sed -i -E "s/$p/[REDACTED]/gi" "$temp_file" 2>/dev/null || true
+                done
+
+                mv "$temp_file" "$session_file"
+                ((files_modified++))
+                ((total_redacted += matches))
+                echo -e "${GREEN}✓ Redacted${NC} $project_name: $matches secret(s)"
+            fi
+        fi
+    done < <(find "$CLAUDE_PROJECTS" -name "*.jsonl" -print0 2>/dev/null) || true
+
+    echo ""
+    if [[ $total_redacted -gt 0 ]]; then
+        echo -e "${GREEN}✓ Redacted $total_redacted secret(s) in $files_modified file(s)${NC}"
+    elif [[ "$dry_run" != "--dry-run" && "$dry_run" != "-n" ]]; then
+        echo -e "${GREEN}✓ No secrets found to redact${NC}"
+    fi
+}
+
+# Security audit
+do_audit() {
+    local issues=0
+
+    echo "Security Audit Report"
+    echo "====================="
+    echo ""
+
+    echo "## Secrets Directory"
+    if [[ ! -d "$SECRETS_DIR" ]]; then
+        echo -e "  ${YELLOW}⚠ ~/.secrets does not exist${NC}"
+    else
+        local secrets_perms=$(stat -c "%a" "$SECRETS_DIR" 2>/dev/null || stat -f "%OLp" "$SECRETS_DIR" 2>/dev/null)
+        if [[ "$secrets_perms" == "700" ]]; then
+            echo -e "  ${GREEN}✓${NC} ~/.secrets is 700 (private)"
+        else
+            echo -e "  ${RED}✗${NC} ~/.secrets is $secrets_perms (should be 700)"
+            ((issues++))
+        fi
+
+        shopt -s nullglob
+        for f in "$SECRETS_DIR"/*; do
+            [[ -f "$f" ]] || continue
+            local perms=$(stat -c "%a" "$f" 2>/dev/null || stat -f "%OLp" "$f" 2>/dev/null)
+            local name=$(basename "$f")
+            if [[ "$perms" == "600" ]]; then
+                echo -e "  ${GREEN}✓${NC} $name is 600 (private)"
+            else
+                echo -e "  ${RED}✗${NC} $name is $perms (should be 600)"
+                ((issues++))
+            fi
+        done
+    fi
+    echo ""
+
+    echo "## Claude Directory"
+    local claude_dir="$HOME/.claude"
+    if [[ -d "$claude_dir" ]]; then
+        local claude_perms=$(stat -c "%a" "$claude_dir" 2>/dev/null || stat -f "%OLp" "$claude_dir" 2>/dev/null)
+        if [[ "$claude_perms" == "700" ]]; then
+            echo -e "  ${GREEN}✓${NC} ~/.claude is 700 (private)"
+        else
+            echo -e "  ${RED}✗${NC} ~/.claude is $claude_perms (should be 700)"
+            ((issues++))
+        fi
+
+        [[ -f "$claude_dir/.credentials.json" ]] && {
+            local creds_perms=$(stat -c "%a" "$claude_dir/.credentials.json" 2>/dev/null || stat -f "%OLp" "$claude_dir/.credentials.json" 2>/dev/null)
+            [[ "$creds_perms" == "600" ]] && echo -e "  ${GREEN}✓${NC} .credentials.json is 600" || { echo -e "  ${RED}✗${NC} .credentials.json is $creds_perms"; ((issues++)); }
+        }
+
+        [[ -d "$claude_dir/projects" ]] && {
+            local proj_perms=$(stat -c "%a" "$claude_dir/projects" 2>/dev/null || stat -f "%OLp" "$claude_dir/projects" 2>/dev/null)
+            [[ "$proj_perms" == "700" ]] && echo -e "  ${GREEN}✓${NC} projects/ is 700" || { echo -e "  ${RED}✗${NC} projects/ is $proj_perms"; ((issues++)); }
+        }
+    fi
+    echo ""
+
+    echo "## Session Log Scan"
+    if [[ -d "$CLAUDE_PROJECTS" ]]; then
+        local pattern=$(build_pattern)
+        local total_leaks=0
+        while IFS= read -r -d '' f; do
+            local m=$(grep -oEi "$pattern" "$f" 2>/dev/null | wc -l || true)
+            ((total_leaks += m))
+        done < <(find "$CLAUDE_PROJECTS" -name "*.jsonl" -print0 2>/dev/null) || true
+
+        if [[ $total_leaks -eq 0 ]]; then
+            echo -e "  ${GREEN}✓${NC} No leaked secrets detected"
+        else
+            echo -e "  ${RED}✗${NC} Found $total_leaks potential leaked secret(s)"
+            echo -e "    Fix: /secrets redact"
+            ((issues++))
+        fi
+    fi
+    echo ""
+
+    echo "## Plugin Integration"
+    if [[ -f "$HOME/.claude/CLAUDE.md" ]] && grep -q "claude-vault" "$HOME/.claude/CLAUDE.md" 2>/dev/null; then
+        echo -e "  ${GREEN}✓${NC} Secrets rule installed in CLAUDE.md"
+    else
+        echo -e "  ${YELLOW}⚠${NC} Secrets rule not in CLAUDE.md (restart session)"
+    fi
+    echo ""
+
+    return $issues
+}
+
+# Auto-fix permission issues
+do_fix() {
+    echo "Fixing security issues..."
+    echo ""
+
+    if [[ -d "$SECRETS_DIR" ]]; then
+        chmod 700 "$SECRETS_DIR" && echo -e "${GREEN}✓${NC} chmod 700 ~/.secrets"
+        shopt -s nullglob
+        for f in "$SECRETS_DIR"/*; do
+            [[ -f "$f" ]] && chmod 600 "$f" && echo -e "${GREEN}✓${NC} chmod 600 $(basename "$f")"
+        done
+    fi
+
+    local claude_dir="$HOME/.claude"
+    if [[ -d "$claude_dir" ]]; then
+        chmod 700 "$claude_dir" && echo -e "${GREEN}✓${NC} chmod 700 ~/.claude"
+        [[ -f "$claude_dir/.credentials.json" ]] && chmod 600 "$claude_dir/.credentials.json"
+        [[ -d "$claude_dir/projects" ]] && chmod 700 "$claude_dir/projects"
+    fi
+
+    echo ""
+    echo "Done. Run '/secrets audit' to verify."
+}
+
+# Main
+case "${1:-help}" in
+    list)       do_list ;;
+    test)       shift; do_test "$@" ;;
+    scan)       shift; do_scan "$@" ;;
+    redact)     shift; do_redact "$@" ;;
+    audit)      do_audit ;;
+    fix)        do_fix ;;
+    help|--help|-h|"")
+        echo "vault-run - Utility commands for claude-vault"
+        echo ""
+        echo "Usage:"
+        echo "  vault-run list              List secrets in ~/.secrets/"
+        echo "  vault-run test <service>    Check if service has secrets"
+        echo "  vault-run scan [-v]         Scan session logs for leaks"
+        echo "  vault-run redact [--dry-run] Redact leaked secrets"
+        echo "  vault-run audit             Security audit report"
+        echo "  vault-run fix               Auto-fix permissions"
+        ;;
+    *)
+        echo "Unknown command: $1" >&2
+        exit 1
+        ;;
+esac
