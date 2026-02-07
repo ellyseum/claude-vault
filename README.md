@@ -102,7 +102,7 @@ chmod 600 ~/.secrets/*
 ```bash
 cat > /tmp/vault-$$.sh << 'EOF'
 #!/bin/bash
-source ~/.secrets/openai.env
+source ~/.secrets/openai.env 2>/dev/null
 curl -s https://api.openai.com/v1/chat/completions \
     -H "Authorization: Bearer $OPENAI_API_KEY" \
     -H "Content-Type: application/json" \
@@ -116,9 +116,9 @@ chmod 700 /tmp/vault-$$.sh && /tmp/vault-$$.sh
 ```bash
 cat > /tmp/vault-$$.sh << 'EOF'
 #!/bin/bash
-DOMAIN=$(jq -r '.domain' ~/.secrets/jira.json)
-EMAIL=$(jq -r '.email' ~/.secrets/jira.json)
-TOKEN=$(jq -r '.apiToken' ~/.secrets/jira.json)
+DOMAIN=$(jq -r '.domain' ~/.secrets/jira.json 2>/dev/null)
+EMAIL=$(jq -r '.email' ~/.secrets/jira.json 2>/dev/null)
+TOKEN=$(jq -r '.apiToken' ~/.secrets/jira.json 2>/dev/null)
 AUTH=$(printf "%s:%s" "$EMAIL" "$TOKEN" | base64 -w0)
 
 curl -s "https://${DOMAIN}/rest/api/3/myself" \
@@ -132,8 +132,22 @@ chmod 700 /tmp/vault-$$.sh && /tmp/vault-$$.sh
 ```bash
 cat > /tmp/vault-$$.sh << 'EOF'
 #!/bin/bash
-source ~/.secrets/github.env
+source ~/.secrets/github.env 2>/dev/null
 gh api /user
+rm -f "$0"
+EOF
+chmod 700 /tmp/vault-$$.sh && /tmp/vault-$$.sh
+```
+
+### npm publish (config file pattern)
+```bash
+cat > /tmp/vault-$$.sh << 'EOF'
+#!/bin/bash
+source ~/.secrets/npm.env 2>/dev/null
+echo "//registry.npmjs.org/:_authToken=${NPM_TOKEN}" > /tmp/.npmrc-vault
+unset NPM_TOKEN
+npm publish --access public --userconfig /tmp/.npmrc-vault
+rm -f /tmp/.npmrc-vault
 rm -f "$0"
 EOF
 chmod 700 /tmp/vault-$$.sh && /tmp/vault-$$.sh
@@ -155,6 +169,7 @@ Already have leaked secrets in your session logs? Fix them:
 | OpenAI | `sk-...`, `sk-proj-...` |
 | Anthropic | `sk-ant-...` |
 | GitHub | `ghp_...`, `gho_...`, `ghu_...`, `ghs_...`, `ghr_...` |
+| npm | `npm_...` |
 | AWS | `AKIA...` (access keys) |
 | Stripe | `sk_live_...`, `sk_test_...`, `pk_live_...`, `pk_test_...` |
 | Slack | `xoxb-...`, `xoxp-...`, `xoxa-...` |
@@ -171,6 +186,27 @@ Already have leaked secrets in your session logs? Fix them:
 - **Secrets dir is 700** - only you can access
 - **Env files are 600** - only you can read
 - **Audit command** - verifies permissions
+
+### Stderr Safety
+
+Bash error messages can leak expanded secrets. For example, if a `source` line has a syntax issue, bash prints the offending line with variables already expanded. All secret-reading lines should suppress stderr:
+
+```bash
+source ~/.secrets/foo.env 2>/dev/null       # safe
+API_KEY=$(jq -r '.key' ~/.secrets/foo.json 2>/dev/null)  # safe
+```
+
+For tools that need tokens in config file format (`.npmrc`, `.netrc`, `.pypirc`), write a temp config file instead of trying to use env var names with special characters:
+
+```bash
+# WRONG - bash can't parse // in variable names, leaks token in error message
+NPM_CONFIG_//registry.npmjs.org/:_authToken="$TOKEN"
+
+# RIGHT - write to temp file, token never hits bash syntax parser
+echo "//registry.npmjs.org/:_authToken=${TOKEN}" > /tmp/.npmrc-vault
+npm publish --userconfig /tmp/.npmrc-vault
+rm -f /tmp/.npmrc-vault
+```
 
 ## Project Structure
 

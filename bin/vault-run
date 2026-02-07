@@ -86,6 +86,7 @@ API_KEY_PATTERNS=(
     'ghu_[a-zA-Z0-9]{36}'
     'ghs_[a-zA-Z0-9]{36}'
     'ghr_[a-zA-Z0-9]{36}'
+    'npm_[a-zA-Z0-9]{36}'
     'AKIA[A-Z0-9]{16}'
     'sk_live_[a-zA-Z0-9]{24,}'
     'sk_test_[a-zA-Z0-9]{24,}'
